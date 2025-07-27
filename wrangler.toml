@@ -1,0 +1,30 @@
+name = "image-transform-worker"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[env.production]
+name = "image-transform-worker"
+
+[[env.production.routes]]
+pattern = "happylee.blog/img-cgi/*"
+zone_name = "happylee.blog"
+
+[[env.production.r2_buckets]]
+binding = "OBSIDIAN_IMAGE"
+bucket_name = "obsidian-image"
+
+# Cloudflare Images 綁定
+[env.production.images]
+binding = "IMAGES"
+
+# 如果需要使用 Cloudflare Images API
+# [[env.production.vars]]
+# name = "IMAGES_API_TOKEN"
+# type = "secret"
+
+# wrangler.toml (wrangler v3.88.0^)
+[observability.logs]
+enabled = true
+
+
+
