@@ -1,6 +1,7 @@
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    // 使用原始路徑避免自動解碼問題
     const pathname = url.pathname;
     
     // 解析 URL 路徑：/img-cgi/{size}/{path-to-image-on-R2}
@@ -12,7 +13,9 @@ export default {
       });
     }
     
-    const [, size, watermarkFlag, imagePath] = match;
+    const [, size, watermarkFlag, rawImagePath] = match;
+    // 手動解碼圖片路徑，確保正確處理 URL 編碼
+    const imagePath = decodeURIComponent(rawImagePath);
     const shouldAddWatermark = watermarkFlag === 'watermark';
     
     try {
