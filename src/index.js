@@ -17,10 +17,35 @@ export default {
     
     // 檢查 If-None-Match header 進行快取控制
     const ifNoneMatch = request.headers.get('If-None-Match');
-    const cacheKey = `processed-${pathname.replace(/[^a-zA-Z0-9-_]/g, '-')}`;
     
     // 簡單的 ETag 生成（基於路徑）
     const etag = `"${btoa(pathname).replace(/[^a-zA-Z0-9]/g, '').substring(0, 16)}"`;
+    
+    // 使用 Cloudflare Cache API 檢查快取
+    // 建立標準化的快取鍵，忽略 Accept header 的差異
+    const cacheUrl = new URL(request.url);
+    const cacheKey = new Request(cacheUrl.toString(), {
+      method: 'GET'
+    });
+    const cache = caches.default;
+    
+    // 嘗試從快取獲取回應
+    let cachedResponse = await cache.match(cacheKey);
+    if (cachedResponse) {
+      // 檢查 ETag 是否匹配
+      const cachedETag = cachedResponse.headers.get('ETag');
+      if (ifNoneMatch === cachedETag) {
+        return new Response(null, { status: 304 });
+      }
+      // 添加 CF-Cache-Status header 表示命中快取
+      const response = new Response(cachedResponse.body, {
+        status: cachedResponse.status,
+        statusText: cachedResponse.statusText,
+        headers: cachedResponse.headers
+      });
+      response.headers.set('CF-Cache-Status', 'HIT');
+      return response;
+    }
     
     // 解析 URL 路徑：/img-cgi/{size}/{path-to-image-on-R2}
     // 支援浮水印參數：/img-cgi/{size}/watermark/{path-to-image-on-R2}
@@ -107,14 +132,23 @@ export default {
             transformOptions = {}; // 不調整尺寸，只加浮水印
           } else {
             // 不做轉換，直接返回原圖
-            return new Response(imageArrayBuffer, {
+            const originalResponse = new Response(imageArrayBuffer, {
               headers: {
                 'Content-Type': object.httpMetadata?.contentType || 'image/jpeg',
                 'Cache-Control': 'public, max-age=31536000, immutable',
                 'ETag': etag,
-                'Vary': 'Accept'
+                // 'Vary': 'Accept',
+                'CF-Cache-Status': 'MISS'
               }
             });
+            
+            // 快取原圖回應
+            const originalToCache = originalResponse.clone();
+            cache.put(cacheKey, originalToCache).catch(err => 
+              console.warn('Failed to cache original response:', err)
+            );
+            
+            return originalResponse;
           }
           break;
         default:
@@ -255,7 +289,16 @@ export default {
       // 添加快取控制 headers
       response.headers.set('ETag', etag);
       response.headers.set('Cache-Control', 'public, max-age=31536000, immutable');
-      response.headers.set('Vary', 'Accept');
+      // 移除 Vary header 以改善快取命中率
+      // response.headers.set('Vary', 'Accept');
+      response.headers.set('CF-Cache-Status', 'MISS');
+      
+      // 將回應存入 Cloudflare Cache API
+      const responseToCache = response.clone();
+      // 非同步快取，不等待結果
+      cache.put(cacheKey, responseToCache).catch(err => 
+        console.warn('Failed to cache response:', err)
+      );
       
       return response;
       
