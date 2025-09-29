@@ -37,13 +37,14 @@ export default {
       if (ifNoneMatch === cachedETag) {
         return new Response(null, { status: 304 });
       }
-      // 添加 CF-Cache-Status header 表示命中快取
+      // 克隆快取的回應並添加 CF-Cache-Status header
       const response = new Response(cachedResponse.body, {
         status: cachedResponse.status,
         statusText: cachedResponse.statusText,
-        headers: cachedResponse.headers
+        headers: new Headers(cachedResponse.headers)
       });
       response.headers.set('CF-Cache-Status', 'HIT');
+      response.headers.set('X-Cache-Time', new Date().toISOString());
       return response;
     }
     
@@ -294,7 +295,9 @@ export default {
       response.headers.set('CF-Cache-Status', 'MISS');
       
       // 將回應存入 Cloudflare Cache API
+      // 克隆回應以避免 body stream 被消耗
       const responseToCache = response.clone();
+      
       // 非同步快取，不等待結果
       cache.put(cacheKey, responseToCache).catch(err => 
         console.warn('Failed to cache response:', err)
