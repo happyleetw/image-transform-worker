@@ -4,6 +4,13 @@ export default {
     // 使用原始路徑避免自動解碼問題
     const pathname = url.pathname;
     
+    // 檢查 If-None-Match header 進行快取控制
+    const ifNoneMatch = request.headers.get('If-None-Match');
+    const cacheKey = `processed-${pathname.replace(/[^a-zA-Z0-9-_]/g, '-')}`;
+    
+    // 簡單的 ETag 生成（基於路徑）
+    const etag = `"${btoa(pathname).replace(/[^a-zA-Z0-9]/g, '').substring(0, 16)}"`;
+    
     // 解析 URL 路徑：/img-cgi/{size}/{path-to-image-on-R2}
     // 支援浮水印參數：/img-cgi/{size}/watermark/{path-to-image-on-R2}
     const match = pathname.match(/^\/img-cgi\/([^\/]+)(?:\/(watermark))?\/(.+)$/);
@@ -18,11 +25,32 @@ export default {
     const imagePath = decodeURIComponent(rawImagePath);
     const shouldAddWatermark = watermarkFlag === 'watermark';
     
+    // 如果客戶端已有快取，直接返回 304
+    if (ifNoneMatch === etag) {
+      return new Response(null, { status: 304 });
+    }
+    
     try {
+      // 設定處理超時保護
+      const processingTimeout = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Processing timeout')), 25000) // 25秒超時
+      );
+      
       // 從 R2 獲取圖片
-      const object = await env.OBSIDIAN_IMAGE.get(imagePath);
+      const object = await Promise.race([
+        env.OBSIDIAN_IMAGE.get(imagePath),
+        processingTimeout
+      ]);
       if (!object) {
         return new Response('Image not found', { status: 404 });
+      }
+      
+      // 檢查圖片大小，避免處理過大的圖片
+      const contentLength = object.size || parseInt(object.httpMetadata?.contentLength) || 0;
+      const MAX_SIZE = 50 * 1024 * 1024; // 50MB 限制
+      
+      if (contentLength > MAX_SIZE) {
+        return new Response('Image too large (max 50MB)', { status: 413 });
       }
       
       // 獲取圖片資料
@@ -71,8 +99,9 @@ export default {
             return new Response(imageArrayBuffer, {
               headers: {
                 'Content-Type': object.httpMetadata?.contentType || 'image/jpeg',
-                'Cache-Control': 'public, max-age=31536000',
-                'ETag': object.httpEtag
+                'Cache-Control': 'public, max-age=31536000, immutable',
+                'ETag': etag,
+                'Vary': 'Accept'
               }
             });
           }
@@ -110,10 +139,36 @@ export default {
       // 如果需要加浮水印
       if (shouldAddWatermark) {
         try {
-          // 獲取浮水印圖片
-          const watermarkResponse = await fetch('https://i.happylee.blog/assets/HappyLee-Logo.png');
-          if (watermarkResponse.ok) {
-            const watermarkArrayBuffer = await watermarkResponse.arrayBuffer();
+          // 嘗試從 R2 獲取快取的浮水印，如果沒有則從外部 URL 獲取
+          let watermarkArrayBuffer;
+          const watermarkCacheKey = 'watermark-cache/HappyLee-Logo.png';
+          
+          try {
+            const cachedWatermark = await env.OBSIDIAN_IMAGE.get(watermarkCacheKey);
+            if (cachedWatermark) {
+              watermarkArrayBuffer = await cachedWatermark.arrayBuffer();
+            } else {
+              // 如果沒有快取，從外部獲取並快取
+              const watermarkResponse = await fetch('https://i.happylee.blog/assets/HappyLee-Logo.png', {
+                cf: { cacheTtl: 86400 } // 快取 24 小時
+              });
+              if (watermarkResponse.ok) {
+                watermarkArrayBuffer = await watermarkResponse.arrayBuffer();
+                // 非同步快取到 R2，不等待結果
+                env.OBSIDIAN_IMAGE.put(watermarkCacheKey, watermarkArrayBuffer, {
+                  httpMetadata: { contentType: 'image/png' }
+                }).catch(err => console.warn('Failed to cache watermark:', err));
+              }
+            }
+          } catch (cacheError) {
+            console.warn('Watermark cache error, using direct fetch:', cacheError);
+            const watermarkResponse = await fetch('https://i.happylee.blog/assets/HappyLee-Logo.png');
+            if (watermarkResponse.ok) {
+              watermarkArrayBuffer = await watermarkResponse.arrayBuffer();
+            }
+          }
+          
+          if (watermarkArrayBuffer) {
             
             // 根據圖片大小決定浮水印尺寸和位置
             const imageWidth = transformOptions.width || 1920; // 預設寬度
@@ -174,17 +229,39 @@ export default {
         outputFormat = 'image/png';
       }
       
-      // 使用正確的 MIME 類型格式
-      const transformedImage = await imageProcessor.output({ 
-        format: outputFormat,
-        quality: quality
-      });
+      // 使用正確的 MIME 類型格式，添加超時保護
+      const transformedImage = await Promise.race([
+        imageProcessor.output({ 
+          format: outputFormat,
+          quality: quality
+        }),
+        processingTimeout
+      ]);
       
-      // 返回轉換後的圖片，.response() 會自動設定正確的 headers
-      return transformedImage.response();
+      // 返回轉換後的圖片，添加快取 headers
+      const response = transformedImage.response();
+      
+      // 添加快取控制 headers
+      response.headers.set('ETag', etag);
+      response.headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+      response.headers.set('Vary', 'Accept');
+      
+      return response;
       
     } catch (error) {
       console.error('Image processing error:', error);
+      
+      // 如果是超時錯誤，返回特定的錯誤訊息
+      if (error.message === 'Processing timeout') {
+        return new Response('Image processing timeout - image may be too large or complex', { 
+          status: 408,
+          headers: {
+            'Cache-Control': 'no-cache',
+            'Retry-After': '60'
+          }
+        });
+      }
+      
       return new Response('Internal server error', { status: 500 });
     }
   }
