@@ -1,5 +1,16 @@
 export default {
   async fetch(request, env) {
+    // 檢查必要的環境變數
+    if (!env.OBSIDIAN_IMAGE) {
+      console.error('Missing OBSIDIAN_IMAGE binding');
+      return new Response('Server configuration error: Missing R2 binding', { status: 500 });
+    }
+    
+    if (!env.IMAGES) {
+      console.error('Missing IMAGES binding');
+      return new Response('Server configuration error: Missing Images binding', { status: 500 });
+    }
+    
     const url = new URL(request.url);
     // 使用原始路徑避免自動解碼問題
     const pathname = url.pathname;
