@@ -258,7 +258,51 @@ npx wrangler r2 object get obsidian-image/your-file.jpg --file test.jpg --remote
 - **AVIF 限制**: 圖片寬度/高度超過 1200px 時會自動降級為 WebP
 - **WebP 限制**: 有損壓縮限制 2560px，無損壓縮限制 1920px  
 - **圖片大小**: 最大 70MB，最大面積 100 megapixels
-- **快取**: 轉換後的圖片會自動快取在 Cloudflare 邊緣節點
+- **快取策略**: 使用 Cloudflare Cache API 實現邊緣快取
+
+### 快取機制說明
+
+本服務使用 **Cloudflare Cache API** 來快取處理後的圖片，提升效能並降低運算成本：
+
+#### 快取 Headers 設定
+- `Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable`
+  - `max-age=31536000`: 瀏覽器快取 1 年
+  - `s-maxage=31536000`: Cloudflare 邊緣快取 1 年
+  - `immutable`: 表示內容永不改變，瀏覽器可放心使用快取
+
+#### 快取特性
+- **區域性快取**: 快取內容存在於發起請求的資料中心，不會自動複製到其他資料中心
+- **首次請求**: 第一次請求會處理圖片並寫入快取 (`X-Cache-Status: MISS`)
+- **後續請求**: 同一資料中心的後續請求直接從快取返回 (`X-Cache-Status: HIT`)
+- **快取鍵**: 使用完整 URL 作為快取鍵，不同尺寸/浮水印參數會產生不同快取
+
+#### 驗證快取是否生效
+
+```bash
+# 檢查 Response Headers
+curl -I https://happylee.blog/img-cgi/960/your-image.jpg
+
+# 應該看到：
+# - X-Cache-Status: MISS (第一次) 或 HIT (後續)
+# - Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable
+# - ETag: "..."
+```
+
+#### 快取清除
+
+如需清除快取，可透過 Cloudflare Dashboard 或 API：
+
+```bash
+# 清除整個 zone 的快取
+curl -X POST "https://api.cloudflare.com/client/v4/zones/{zone_id}/purge_cache" \
+  -H "Authorization: Bearer {api_token}" \
+  -d '{"purge_everything":true}'
+
+# 清除特定 URL
+curl -X POST "https://api.cloudflare.com/client/v4/zones/{zone_id}/purge_cache" \
+  -H "Authorization: Bearer {api_token}" \
+  -d '{"files":["https://happylee.blog/img-cgi/960/your-image.jpg"]}'
+```
 
 ## 🔮 未來擴展
 

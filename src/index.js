@@ -1,5 +1,5 @@
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     // 檢查必要的環境變數
     if (!env.OBSIDIAN_IMAGE) {
       console.error('Missing OBSIDIAN_IMAGE binding');
@@ -32,21 +32,20 @@ export default {
     // 嘗試從快取獲取回應
     let cachedResponse = await cache.match(cacheKey);
     if (cachedResponse) {
+      console.log(`Cache HIT: ${request.url}`);
       // 檢查 ETag 是否匹配
       const cachedETag = cachedResponse.headers.get('ETag');
       if (ifNoneMatch === cachedETag) {
         return new Response(null, { status: 304 });
       }
-      // 克隆快取的回應並添加 CF-Cache-Status header
-      const response = new Response(cachedResponse.body, {
-        status: cachedResponse.status,
-        statusText: cachedResponse.statusText,
-        headers: new Headers(cachedResponse.headers)
-      });
-      response.headers.set('CF-Cache-Status', 'HIT');
+      // 重新構建 Response 以添加 debug headers
+      const response = new Response(cachedResponse.body, cachedResponse);
+      response.headers.set('X-Cache-Status', 'HIT');
       response.headers.set('X-Cache-Time', new Date().toISOString());
       return response;
     }
+    
+    console.log(`Cache MISS: ${request.url}`);
     
     // 解析 URL 路徑：/img-cgi/{size}/{path-to-image-on-R2}
     // 支援浮水印參數：/img-cgi/{size}/watermark/{path-to-image-on-R2}
@@ -136,18 +135,14 @@ export default {
             const originalResponse = new Response(imageArrayBuffer, {
               headers: {
                 'Content-Type': object.httpMetadata?.contentType || 'image/jpeg',
-                'Cache-Control': 'public, max-age=31536000, immutable',
-                'ETag': etag,
-                // 'Vary': 'Accept',
-                'CF-Cache-Status': 'MISS'
+                'Cache-Control': 'public, max-age=31536000, s-maxage=31536000, immutable',
+                'ETag': object.httpEtag || etag,
+                'X-Cache-Status': 'MISS'
               }
             });
             
-            // 快取原圖回應
-            const originalToCache = originalResponse.clone();
-            cache.put(cacheKey, originalToCache).catch(err => 
-              console.warn('Failed to cache original response:', err)
-            );
+            // 使用 ctx.waitUntil() 非同步寫入快取
+            ctx.waitUntil(cache.put(cacheKey, originalResponse.clone()));
             
             return originalResponse;
           }
@@ -284,24 +279,25 @@ export default {
         processingTimeout
       ]);
       
-      // 返回轉換後的圖片，添加快取 headers
-      const response = transformedImage.response();
-      
-      // 添加快取控制 headers
-      response.headers.set('ETag', etag);
-      response.headers.set('Cache-Control', 'public, max-age=31536000, immutable');
-      // 移除 Vary header 以改善快取命中率
-      // response.headers.set('Vary', 'Accept');
-      response.headers.set('CF-Cache-Status', 'MISS');
-      
-      // 將回應存入 Cloudflare Cache API
-      // 克隆回應以避免 body stream 被消耗
-      const responseToCache = response.clone();
-      
-      // 非同步快取，不等待結果
-      cache.put(cacheKey, responseToCache).catch(err => 
-        console.warn('Failed to cache response:', err)
+      // ⚠️ 重要：必須重新構建 Response 物件才能修改 headers
+      let response = new Response(
+        transformedImage.response().body,
+        transformedImage.response()
       );
+      
+      // 設定快取 headers
+      // s-maxage: 控制 Cloudflare 邊緣快取時間
+      // max-age: 控制瀏覽器快取時間
+      // immutable: 表示內容永不改變
+      response.headers.set('Cache-Control', 'public, max-age=31536000, s-maxage=31536000, immutable');
+      response.headers.set('ETag', object.httpEtag || etag);
+      response.headers.set('X-Cache-Status', 'MISS');
+      
+      // ⚠️ 使用 ctx.waitUntil() 非同步寫入快取，不阻塞回應
+      // ⚠️ 必須使用 response.clone() 因為 Response body 只能讀取一次
+      if (response.ok) {
+        ctx.waitUntil(cache.put(cacheKey, response.clone()));
+      }
       
       return response;
       
